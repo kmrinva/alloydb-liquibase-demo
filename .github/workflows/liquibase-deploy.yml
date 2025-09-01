@@ -1,0 +1,76 @@
+name: Liquibase Database Migration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'changelog/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'changelog/**'
+  workflow_dispatch:
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  ALLOYDB_DATABASE: ${{ secrets.ALLOYDB_DATABASE }}
+
+jobs:
+  liquibase-deploy:
+    name: Deploy Database Changes
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up AlloyDB Auth Proxy
+        run: |
+          # Download AlloyDB Auth Proxy
+          wget "https://storage.googleapis.com/alloydb-auth-proxy/v1.13.4/alloydb-auth-proxy.linux.amd64" -O alloydb-auth-proxy
+          chmod +x alloydb-auth-proxy
+          
+          # Start proxy in background
+          ./alloydb-auth-proxy "${{ secrets.ALLOYDB_INSTANCE_URI }}" --port=5432 &
+          
+          # Wait for proxy to be ready
+          timeout 30 bash -c 'until nc -z localhost 5432; do sleep 1; done'
+          echo "AlloyDB Auth Proxy is ready"
+
+      - name: Set up Liquibase
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: '4.33.0'
+          edition: 'oss'
+
+      - name: Run Liquibase Migration
+        run: |
+          # Set database connection parameters
+          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}"
+          export LIQUIBASE_COMMAND_USERNAME="postgres"
+          export LIQUIBASE_COMMAND_PASSWORD="SecurePassword123!"
+          
+          echo "Running Liquibase status..."
+          liquibase status --verbose
+          
+          echo "Running Liquibase migration..."
+          liquibase update
+          
+          echo "Migration completed successfully!"
+
+      - name: Post-deployment History
+        if: success()
+        run: |
+          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}"
+          export LIQUIBASE_COMMAND_USERNAME="postgres"
+          export LIQUIBASE_COMMAND_PASSWORD="SecurePassword123!"
+          
+          echo "Deployment history:"
+          liquibase history
