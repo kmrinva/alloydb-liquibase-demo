@@ -39,26 +39,24 @@ jobs:
           echo "Downloading AlloyDB Auth Proxy..."
           curl -o alloydb-auth-proxy https://storage.googleapis.com/alloydb-auth-proxy/v1.13.4/alloydb-auth-proxy.linux.amd64
           chmod +x alloydb-auth-proxy
-          
-          echo "Testing proxy executable..."
-          ./alloydb-auth-proxy --version || echo "Version check failed, but continuing..."
+          ./alloydb-auth-proxy --version
 
       - name: Start AlloyDB Auth Proxy
         run: |
           echo "Starting AlloyDB Auth Proxy..."
           echo "Instance URI: ${{ secrets.ALLOYDB_INSTANCE_URI }}"
           
-          # Start proxy in background with verbose logging
+          # Start proxy in background (removed --private-ip flag)
           ./alloydb-auth-proxy "${{ secrets.ALLOYDB_INSTANCE_URI }}" \
             --port=5432 \
-            --private-ip \
+            --debug-logs \
             > proxy.log 2>&1 &
           
-          # Store PID for later cleanup
+          # Store PID for cleanup
           echo $! > proxy.pid
           
           echo "Waiting for proxy to start..."
-          sleep 10
+          sleep 15
           
           # Check if proxy is running
           if ps -p $(cat proxy.pid) > /dev/null; then
@@ -71,9 +69,10 @@ jobs:
           
           # Test connection to proxy
           echo "Testing proxy connectivity..."
-          timeout 30 bash -c 'while ! nc -z localhost 5432; do sleep 1; done' || {
-            echo "Proxy port 5432 not accessible. Log contents:"
+          timeout 60 bash -c 'while ! nc -z localhost 5432; do sleep 2; done' || {
+            echo "Proxy port 5432 not accessible after 60s. Log contents:"
             cat proxy.log
+            ps aux | grep alloydb-auth-proxy || echo "No proxy processes found"
             exit 1
           }
           
@@ -91,12 +90,12 @@ jobs:
           export PGCONNECT_TIMEOUT=30
           export PGPASSWORD="SecurePassword123!"
           
-          # Test with psql first
+          # Install psql
           sudo apt-get update && sudo apt-get install -y postgresql-client
           
           echo "Testing psql connection..."
           timeout 30 psql -h localhost -p 5432 -U postgres -d ${{ env.ALLOYDB_DATABASE }} -c "SELECT version();" || {
-            echo "psql connection failed. Checking proxy logs:"
+            echo "psql connection failed. Proxy logs:"
             cat proxy.log
             exit 1
           }
@@ -105,33 +104,35 @@ jobs:
         run: |
           echo "Running Liquibase migration..."
           
-          # Set database connection parameters with explicit SSL settings
-          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}?sslmode=require"
+          # Set connection parameters
+          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}"
           export LIQUIBASE_COMMAND_USERNAME="postgres"
           export LIQUIBASE_COMMAND_PASSWORD="SecurePassword123!"
           
           echo "Running Liquibase status..."
-          liquibase status --verbose || {
-            echo "Liquibase status failed. Proxy logs:"
-            cat proxy.log
-            exit 1
-          }
+          liquibase status --verbose
           
           echo "Running Liquibase update..."
-          liquibase update || {
-            echo "Liquibase update failed. Proxy logs:"
-            cat proxy.log
-            exit 1
-          }
+          liquibase update
           
           echo "Migration completed successfully!"
+
+      - name: Post-deployment History
+        if: success()
+        run: |
+          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}"
+          export LIQUIBASE_COMMAND_USERNAME="postgres"
+          export LIQUIBASE_COMMAND_PASSWORD="SecurePassword123!"
+          
+          echo "Deployment history:"
+          liquibase history
 
       - name: Cleanup
         if: always()
         run: |
           echo "Cleaning up AlloyDB Auth Proxy..."
           if [ -f proxy.pid ]; then
-            kill $(cat proxy.pid) || echo "Proxy already stopped"
+            kill $(cat proxy.pid) 2>/dev/null || echo "Proxy already stopped"
           fi
           echo "Final proxy logs:"
           cat proxy.log || echo "No proxy logs found"
