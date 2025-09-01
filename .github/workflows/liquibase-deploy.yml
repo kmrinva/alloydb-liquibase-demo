@@ -84,19 +84,40 @@ jobs:
           version: '4.33.0'
           edition: 'oss'
 
-      - name: Test Database Connection
+      - name: Debug Database Connection
         run: |
-          echo "Testing database connection..."
-          export PGCONNECT_TIMEOUT=30
+          echo "=== Debugging Database Connection ==="
+          
+          # Check if proxy is still running
+          if ps -p $(cat proxy.pid) > /dev/null; then
+            echo "✓ Proxy is still running (PID: $(cat proxy.pid))"
+          else
+            echo "✗ Proxy stopped running. Latest logs:"
+            cat proxy.log
+            exit 1
+          fi
+          
+          # Check proxy logs for errors
+          echo "=== Proxy Logs ==="
+          cat proxy.log
+          echo "==================="
+          
+          # Test basic connectivity
+          echo "Testing basic port connectivity..."
+          nc -z localhost 5432 && echo "✓ Port 5432 is accessible" || echo "✗ Port 5432 not accessible"
+          
+          # Test with timeout and verbose output
+          export PGCONNECT_TIMEOUT=10
           export PGPASSWORD="SecurePassword123!"
           
-          # Install psql
           sudo apt-get update && sudo apt-get install -y postgresql-client
           
-          echo "Testing psql connection..."
-          timeout 30 psql -h localhost -p 5432 -U postgres -d ${{ env.ALLOYDB_DATABASE }} -c "SELECT version();" || {
-            echo "psql connection failed. Proxy logs:"
-            cat proxy.log
+          echo "Attempting psql connection with verbose output..."
+          psql -h localhost -p 5432 -U postgres -d ${{ env.ALLOYDB_DATABASE }} -c "SELECT 1;" -v ON_ERROR_STOP=1 || {
+            echo "psql failed. Checking what's listening on port 5432:"
+            netstat -tlnp | grep 5432 || echo "Nothing listening on 5432"
+            echo "Proxy process status:"
+            ps aux | grep alloydb-auth-proxy
             exit 1
           }
 
