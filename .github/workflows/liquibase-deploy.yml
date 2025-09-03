@@ -46,7 +46,7 @@ jobs:
           echo "Starting AlloyDB Auth Proxy..."
           echo "Instance URI: ${{ secrets.ALLOYDB_INSTANCE_URI }}"
           
-          # Start proxy in background (removed --private-ip flag)
+          # Start proxy in background
           ./alloydb-auth-proxy "${{ secrets.ALLOYDB_INSTANCE_URI }}" \
             --port=5432 \
             --debug-logs \
@@ -56,7 +56,7 @@ jobs:
           echo $! > proxy.pid
           
           echo "Waiting for proxy to start..."
-          sleep 15
+          sleep 20
           
           # Check if proxy is running
           if ps -p $(cat proxy.pid) > /dev/null; then
@@ -67,14 +67,22 @@ jobs:
             exit 1
           fi
           
-          # Test connection to proxy
-          echo "Testing proxy connectivity..."
-          timeout 60 bash -c 'while ! nc -z localhost 5432; do sleep 2; done' || {
-            echo "Proxy port 5432 not accessible after 60s. Log contents:"
-            cat proxy.log
-            ps aux | grep alloydb-auth-proxy || echo "No proxy processes found"
-            exit 1
-          }
+          # Wait for proxy to accept connections with retries
+          echo "Waiting for proxy to accept connections..."
+          for i in {1..15}; do
+            if timeout 5 bash -c "</dev/tcp/127.0.0.1/5432" 2>/dev/null; then
+              echo "✓ Proxy accepting connections on attempt $i"
+              break
+            else
+              echo "⚠ Connection attempt $i failed, waiting 3 seconds..."
+              sleep 3
+              if [ $i -eq 15 ]; then
+                echo "Proxy not accepting connections after 15 attempts. Log contents:"
+                cat proxy.log
+                exit 1
+              fi
+            fi
+          done
           
           echo "AlloyDB Auth Proxy is ready!"
 
@@ -84,9 +92,9 @@ jobs:
           version: '4.33.0'
           edition: 'oss'
 
-      - name: Debug Database Connection
+      - name: Test Database Connection
         run: |
-          echo "=== Debugging Database Connection ==="
+          echo "=== Testing Database Connection ==="
           
           # Check if proxy is still running
           if ps -p $(cat proxy.pid) > /dev/null; then
@@ -97,38 +105,37 @@ jobs:
             exit 1
           fi
           
-          # Check proxy logs for errors
-          echo "=== Proxy Logs ==="
-          cat proxy.log
-          echo "==================="
-          
-          # Test basic connectivity
-          echo "Testing basic port connectivity..."
-          nc -z localhost 5432 && echo "✓ Port 5432 is accessible" || echo "✗ Port 5432 not accessible"
-          
-          # Test with timeout and verbose output
-          export PGCONNECT_TIMEOUT=10
-          export PGPASSWORD="SecurePassword123!"
-          
+          # Install PostgreSQL client
           sudo apt-get update && sudo apt-get install -y postgresql-client
           
-          echo "Attempting psql connection with verbose output..."
-          psql -h localhost -p 5432 -U postgres -d ${{ env.ALLOYDB_DATABASE }} -c "SELECT 1;" -v ON_ERROR_STOP=1 || {
-            echo "psql failed. Checking what's listening on port 5432:"
+          # Set connection parameters with increased timeout
+          export PGCONNECT_TIMEOUT=30
+          export PGPASSWORD="SecurePassword123!"
+          
+          echo "Testing database connection..."
+          # Force IPv4 connection to avoid IPv6 issues
+          psql -h 127.0.0.1 -p 5432 -U postgres -d ${{ env.ALLOYDB_DATABASE }} -c "SELECT 1 AS connection_test;" || {
+            echo "Database connection failed. Debugging info:"
+            echo "=== Proxy Logs ==="
+            cat proxy.log
+            echo "==================="
+            echo "Port status:"
             netstat -tlnp | grep 5432 || echo "Nothing listening on 5432"
             echo "Proxy process status:"
             ps aux | grep alloydb-auth-proxy
             exit 1
           }
+          
+          echo "✓ Database connection successful!"
 
       - name: Run Liquibase Migration
         run: |
           echo "Running Liquibase migration..."
           
           # Set connection parameters
-          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}"
+          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://127.0.0.1:5432/${{ env.ALLOYDB_DATABASE }}"
           export LIQUIBASE_COMMAND_USERNAME="postgres"
-          export LIQUIBASE_COMMAND_PASSWORD="SecurePassword123!"
+          export LIQUIBASE_COMMAND_PASSWORD="${{ env.ALLOYDB_PASSWORD }}"
           
           echo "Running Liquibase status..."
           liquibase status --verbose
@@ -141,7 +148,7 @@ jobs:
       - name: Post-deployment History
         if: success()
         run: |
-          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://localhost:5432/${{ env.ALLOYDB_DATABASE }}"
+          export LIQUIBASE_COMMAND_URL="jdbc:postgresql://127.0.0.1:5432/${{ env.ALLOYDB_DATABASE }}"
           export LIQUIBASE_COMMAND_USERNAME="postgres"
           export LIQUIBASE_COMMAND_PASSWORD="SecurePassword123!"
           
