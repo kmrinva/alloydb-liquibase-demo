@@ -1,4 +1,4 @@
-name: Liquibase → AlloyDB via Auth Proxy (basic auth)
+name: Liquibase → AlloyDB via Auth Proxy
 
 on:
   workflow_dispatch:
@@ -9,85 +9,86 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      # Build the instance URI if you didn't store ALLOYDB_INSTANCE_URI directly
-      INSTANCE_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
-      JDBC_DB: ${{ secrets.ALLOYDB_DATABASE }}
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      REGION:     ${{ secrets.ALLOYDB_REGION }}          # e.g., us-central1
+      CLUSTER:    ${{ secrets.ALLOYDB_CLUSTER }}         # e.g., my-cluster
+      INSTANCE:   ${{ secrets.ALLOYDB_INSTANCE }}        # e.g., primary-instance
+      DB_NAME:    ${{ secrets.ALLOYDB_DATABASE }}        # e.g., appdb
+      DB_USER:    ${{ secrets.ALLOYDB_DB_USER }}         # e.g., alloydbuser
+      # Build the canonical AlloyDB instance URI
+      ALLOYDB_INSTANCE_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
+      # Liquibase JDBC URL hits the local proxy:
+      LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:5432/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
+      LIQUIBASE_USERNAME: ${{ secrets.ALLOYDB_DB_USER }}
+      LIQUIBASE_PASSWORD: ${{ secrets.ALLOYDB_DB_PASSWORD }} # optional if using IAM auth
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java (for Liquibase)
-        uses: actions/setup-java@v4
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
         with:
-          distribution: temurin
-          java-version: "21"
+          version: ">= 486.0.0"
 
-      - name: Install Liquibase CLI + PostgreSQL JDBC
-        run: |
-          LQ_VER=4.29.2
-          curl -sSL -o liquibase.zip "https://github.com/liquibase/liquibase/releases/download/v${LQ_VER}/liquibase-${LQ_VER}.zip"
-          unzip -q liquibase.zip -d "$HOME/liquibase"
-          echo "$HOME/liquibase" >> "$GITHUB_PATH"
-          curl -sSL -o "$HOME/postgresql.jar" "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Write Service Account key to disk
-        # The proxy uses this to authenticate (you can also use ADC via google-github-actions/auth)
+      - name: Verify SA has AlloyDB Client
         run: |
-          echo '${{ secrets.GCP_SA_KEY }}' > "$HOME/sa.json"
-          chmod 600 "$HOME/sa.json"
+          gcloud projects get-iam-policy "$PROJECT_ID" >/dev/null
+          echo "Authenticated as: $(gcloud config list account --format 'value(core.account)')"
+          # Required role: roles/alloydb.client
 
       - name: Download AlloyDB Auth Proxy
         run: |
-          PROXY_URL="https://storage.googleapis.com/alloydb-auth-proxy/v1.7.0/alloydb-auth-proxy.linux.amd64"
-          curl -sSL "$PROXY_URL" -o "$HOME/alloydb-auth-proxy"
-          chmod +x "$HOME/alloydb-auth-proxy"
+          curl -L -o alloydb-auth-proxy https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64
+          chmod +x alloydb-auth-proxy
 
-      - name: Start AlloyDB Auth Proxy (background)
+      - name: Start AlloyDB Auth Proxy
         env:
-          # If you stored ALLOYDB_INSTANCE_URI directly, use that instead of $INSTANCE_URI
-          TARGET_URI: ${{ secrets.ALLOYDB_INSTANCE_URI != '' && secrets.ALLOYDB_INSTANCE_URI || env.INSTANCE_URI }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
         run: |
-          # Bind local port 5432 to the remote AlloyDB instance via the proxy
-          "$HOME/alloydb-auth-proxy" \
-            --credentials-file="$HOME/sa.json" \
+          # If you prefer passing a file explicitly:
+          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
+          ./alloydb-auth-proxy \
             --port=5432 \
-            "$TARGET_URI" &
+            --credentials-file=sa.json \
+            "$ALLOYDB_INSTANCE_URI" &
           echo $! > proxy.pid
 
-          # Wait for the proxy to be ready
+      - name: Wait for proxy on 5432
+        run: |
           for i in {1..30}; do
-            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && echo "Proxy is up" && break
+            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && exit 0
             sleep 1
           done
+          echo "Proxy did not start on 5432 in time" >&2
+          exit 1
 
-      - name: Liquibase validate
-        env:
-          JDBC_URL: "jdbc:postgresql://127.0.0.1:5432/${{ env.JDBC_DB }}?sslmode=disable"
+      - name: Install Liquibase + JDBC
         run: |
-          liquibase \
-            --classpath="$HOME/postgresql.jar" \
-            --url="$JDBC_URL" \
-            --username="${{ secrets.ALLOYDB_USER }}" \
-            --password="${{ secrets.ALLOYDB_PASSWORD }}" \
-            --changelog-file="changelog.xml" \
-            validate
+          curl -L -o liquibase.tar.gz https://github.com/liquibase/liquibase/releases/download/v4.29.2/liquibase-4.29.2.tar.gz
+          tar -xzf liquibase.tar.gz
+          sudo mv liquibase /usr/local/bin/
+          # PostgreSQL JDBC driver
+          curl -L -o postgresql.jar https://jdbc.postgresql.org/download/postgresql-42.7.4.jar
 
       - name: Liquibase update
         env:
-          JDBC_URL: "jdbc:postgresql://127.0.0.1:5432/${{ env.JDBC_DB }}?sslmode=disable"
+          LIQUIBASE_CLASSPATH: ${{ github.workspace }}/postgresql.jar
         run: |
           liquibase \
-            --classpath="$HOME/postgresql.jar" \
-            --url="$JDBC_URL" \
-            --username="${{ secrets.DB_USER }}" \
-            --password="${{ secrets.DB_PASSWORD }}" \
-            --changelog-file="changelog.xml" \
+            --url="${LIQUIBASE_URL}" \
+            --username="${LIQUIBASE_USERNAME}" \
+            --password="${LIQUIBASE_PASSWORD}" \
+            --changeLogFile=changelog/changelog.xml \
+            --classpath="$LIQUIBASE_CLASSPATH" \
             update
 
       - name: Stop proxy
         if: always()
         run: |
-          if [ -f proxy.pid ]; then
-            kill "$(cat proxy.pid)" || true
-          fi
+          if [ -f proxy.pid ]; then kill $(cat proxy.pid) || true; fi
