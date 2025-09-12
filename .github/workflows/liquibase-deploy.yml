@@ -33,7 +33,7 @@ jobs:
       - name: Authenticate to GCP (service account JSON)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
 
       - name: Download AlloyDB Auth Proxy
         run: |
@@ -42,7 +42,7 @@ jobs:
 
       - name: Start AlloyDB Auth Proxy
         run: |
-          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
+          echo '${{ secrets.GCP_SA_KEY_JSON }}' > sa.json
           ./alloydb-auth-proxy             --port=5432             --credentials-file=sa.json             "$ALLOYDB_INSTANCE_URI" &
           echo $! > proxy.pid
 
@@ -62,19 +62,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Liquibase CLI (v4.33.0 OSS)
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: '4.33.0'
+          edition: 'oss'
+
       - name: Download PostgreSQL JDBC driver
         run: |
           curl -L -o postgresql.jar https://jdbc.postgresql.org/download/postgresql-42.7.4.jar
 
-      - name: Liquibase update (GitHub Action)
-        uses: liquibase/liquibase-github-action@v4.29.2
-        with:
-          operation: 'update'
-          changelogFile: 'changelog/changelog.xml'
-          classpath: 'postgresql.jar'
-          url: ${{ env.LIQUIBASE_URL }}
-          username: ${{ env.DB_USER }}
-          password: ${{ env.DB_PASSWORD }}
+      - name: Liquibase update (CLI)
+        env:
+          LIQUIBASE_LOG_LEVEL: info
+        run: |
+          liquibase             -
+          -url="${LIQUIBASE_URL}"             
+          --username="${DB_USER}"             
+          --password="${DB_PASSWORD}"             
+          --changelog-file=changelog/changelog.xml             
+          --classpath=postgresql.jar             
+          update
 
       - name: Stop proxy
         if: always()
