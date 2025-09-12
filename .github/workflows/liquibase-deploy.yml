@@ -22,7 +22,7 @@ jobs:
   liquibase-deploy:
     name: Deploy Database Changes
     runs-on: self-hosted
-    labels: [gcp-vpc]
+    labels: default
     
     steps:
       - name: Checkout Repository
