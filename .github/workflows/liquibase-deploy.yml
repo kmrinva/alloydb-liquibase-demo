@@ -33,7 +33,7 @@ jobs:
       - name: Authenticate to GCP (service account JSON)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY_JSON }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Download AlloyDB Auth Proxy
         run: |
@@ -42,7 +42,7 @@ jobs:
 
       - name: Start AlloyDB Auth Proxy
         run: |
-          echo '${{ secrets.GCP_SA_KEY_JSON }}' > sa.json
+          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
           ./alloydb-auth-proxy             --port=5432             --credentials-file=sa.json             "$ALLOYDB_INSTANCE_URI" &
           echo $! > proxy.pid
 
