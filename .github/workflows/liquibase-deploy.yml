@@ -36,11 +36,9 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Verify SA has AlloyDB Client
+      - name: Show active identity (no IAM read)
         run: |
-          gcloud projects get-iam-policy "$PROJECT_ID" >/dev/null
-          echo "Authenticated as: $(gcloud config list account --format 'value(core.account)')"
-          # Required role: roles/alloydb.client
+        echo "Authenticated as: $(gcloud config list account --format 'value(core.account)')"
 
       - name: Download AlloyDB Auth Proxy
         run: |
