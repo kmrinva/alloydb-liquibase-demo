@@ -73,7 +73,8 @@ jobs:
           curl -L -o postgresql.jar https://jdbc.postgresql.org/download/postgresql-42.7.4.jar
 
        - name: Liquibase update (multiline, safe)
-        shell: bash
+        shell: bash       
+
         run: |
         set -euo pipefail
         liquibase \
@@ -84,6 +85,7 @@ jobs:
           --classpath="${HOME}/postgresql.jar" \
           --log-level="${LIQUIBASE_LOG_LEVEL}" \
           update
+          
       - name: Stop proxy
         if: always()
         run: |
