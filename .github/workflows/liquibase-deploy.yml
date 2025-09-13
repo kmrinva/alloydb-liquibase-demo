@@ -37,44 +37,52 @@ jobs:
 
       - name: Download AlloyDB Auth Proxy
         run: |
-          curl -L -o alloydb-auth-proxy https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64
+          curl -sSL -o alloydb-auth-proxy "https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64"
           chmod +x alloydb-auth-proxy
+          ./alloydb-auth-proxy --version
 
-      - name: Start AlloyDB Auth Proxy
+      - name: Start AlloyDB Auth Proxy (verbose, port 6543)
+        env:
+          TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
         run: |
           echo '${{ secrets.GCP_SA_KEY }}' > sa.json
-          ./alloydb-auth-proxy             --port=5432             --credentials-file=sa.json             "$ALLOYDB_INSTANCE_URI" &
+          # Run proxy with verbose logging and bind explicitly to loopback on port 6543
+          ./alloydb-auth-proxy \
+            --verbose \
+            --address=127.0.0.1 \
+            --port=6543 \
+            --credentials-file=sa.json \
+            "$TARGET_URI" > proxy.log 2>&1 &
           echo $! > proxy.pid
+          # Wait for the port to open
+          for i in {1..30}; do (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy up" && break; sleep 1; done
+          # Show the last few lines now; we will also cat this file if anything fails later
+          tail -n 50 proxy.log || true
 
-      - name: Wait for proxy on 5432
-        shell: bash
+      - name: Install psql client and test connectivity
         run: |
-          for i in {1..30}; do
-            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && exit 0
-            sleep 1
-          done
-          echo "Proxy did not start on 5432 in time" >&2
-          exit 1
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+          # Try a lightweight connection first (no query)
+          PGPASSWORD='${{ secrets.ALLOYDB_DB_PASSWORD }}' psql \
+            "host=127.0.0.1 port=6543 dbname=${{ secrets.ALLOYDB_DATABASE }} user=${{ secrets.ALLOYDB_DB_USER }} sslmode=disable" \
+            -c '\conninfo'
 
       - name: Setup Liquibase CLI (v4.33.0 OSS)
         uses: liquibase/setup-liquibase@v1
         with:
-          version: '4.33.0'
-          edition: 'oss'
+          version: "4.33.0"
+          edition: "oss"
 
       - name: Download PostgreSQL JDBC driver
-        run: |
-          curl -L -o postgresql.jar https://jdbc.postgresql.org/download/postgresql-42.7.4.jar
+        run: curl -sSL -o postgresql.jar "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
 
-      - name: Liquibase update (multiline, safe)  
+      - name: Liquibase update (use proxy on 6543)
         shell: bash
         env:
+          LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:6543/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
+          DB_USER: ${{ secrets.ALLOYDB_DB_USER }}
+          DB_PASSWORD: ${{ secrets.ALLOYDB_DB_PASSWORD }}
           LIQUIBASE_LOG_LEVEL: info
         run: |
           set -euo pipefail
@@ -86,6 +94,19 @@ jobs:
             --classpath="${{ github.workspace }}/postgresql.jar" \
             --log-level="${LIQUIBASE_LOG_LEVEL}" \
             update
+
+      - name: If failure, show proxy logs
+        if: failure()
+        run: |
+          echo "===== AlloyDB Auth Proxy Logs ====="
+          tail -n +1 proxy.log || true
+
+      - name: Stop proxy
+        if: always()
+        run: |
+          if [ -f proxy.pid ]; then kill "$(cat proxy.pid)" || true; fi
+
+
           
       - name: Stop proxy
         if: always()
