@@ -1,200 +1,126 @@
-name: Liquibase → AlloyDB via Auth Proxy Claude
+name: Liquibase - AlloyDB via Auth Proxy
 
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      REGION: ${{ secrets.ALLOYDB_REGION }}
-      CLUSTER: ${{ secrets.ALLOYDB_CLUSTER }}
-      INSTANCE: ${{ secrets.ALLOYDB_INSTANCE }}
-      DB_NAME: ${{ secrets.ALLOYDB_DATABASE }}
-      DB_USER: ${{ secrets.ALLOYDB_DB_USER }}
-      DB_PASSWORD: ${{ secrets.ALLOYDB_DB_PASSWORD }}
-      # Use consistent port throughout
-      PROXY_PORT: 5432
-      LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:5432/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Authenticate with proper scopes
+      # Authenticate to GCP with a JSON key (WIF also works if you prefer)
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-          # Ensure service account has these roles:
-          # - Cloud AlloyDB Client
-          # - Cloud SQL Client (sometimes needed)
 
-      - name: Setup gcloud CLI
+      # (Optional) Install gcloud CLI if you need gcloud commands later
+      - name: Setup gcloud CLI (optional)
         uses: google-github-actions/setup-gcloud@v2
         with:
-          version: "latest"
+          version: ">= 486.0.0"
 
-      # 2) Download correct AlloyDB Auth Proxy version
+      # Download the AlloyDB Auth Proxy
       - name: Download AlloyDB Auth Proxy
         shell: bash
         run: |
           set -euo pipefail
-          
-          # Use latest version - check https://github.com/GoogleCloudPlatform/alloydb-auth-proxy/releases
-          PROXY_VERSION="v1.8.0"  # Update to latest available version
-          
-          # Download for linux-amd64
-          curl -sSL -o alloydb-auth-proxy \
-            "https://github.com/GoogleCloudPlatform/alloydb-auth-proxy/releases/download/${PROXY_VERSION}/alloydb-auth-proxy.linux.amd64"
-          
+          curl -sSL -o alloydb-auth-proxy "https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64"
           chmod +x alloydb-auth-proxy
-          ./alloydb-auth-proxy --version
+          ./alloydb-auth-proxy --help >/dev/null 2>&1 || { echo "Proxy binary not runnable"; exit 1; }
 
-      # 3) Start proxy with proper configuration
-      - name: Start AlloyDB Auth Proxy
+      # Start the proxy on port 5432 and wait until it's listening
+      - name: Start AlloyDB Auth Proxy (port 5432)
         shell: bash
+        env:
+          TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
         run: |
           set -euo pipefail
-          
-          # Build the instance connection name
-          INSTANCE_URI="projects/${PROJECT_ID}/locations/${REGION}/clusters/${CLUSTER}/instances/${INSTANCE}"
-          echo "Connecting to: ${INSTANCE_URI}"
-          
-          # Start proxy in background with consistent port
+          echo "Using instance URI: $TARGET_URI"
+          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
+          chmod 600 sa.json
+
           ./alloydb-auth-proxy \
-            --address=0.0.0.0 \
-            --port=${PROXY_PORT} \
-            --credentials-json=<(echo '${{ secrets.GCP_SA_KEY }}') \
-            "${INSTANCE_URI}" > proxy.log 2>&1 &
-          
-          # Store PID for cleanup
+            --address=127.0.0.1 \
+            --port=5432 \
+            --credentials-file=sa.json \
+            "$TARGET_URI" > proxy.log 2>&1 &
+
           echo $! > proxy.pid
-          
-          # Wait for proxy to be ready (up to 60 seconds)
-          echo "Waiting for proxy to start..."
-          for i in {1..60}; do
+
+          # Wait up to ~30s for port 5432 to open and ensure process stays alive
+          for i in {1..30}; do
             if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
-              echo "❌ Proxy process died unexpectedly"
-              echo "=== Proxy Logs ==="
-              cat proxy.log || true
+              echo "Proxy process exited unexpectedly:"
+              sed -n '1,200p' proxy.log || true
               exit 1
             fi
-            
-            # Test if port is accepting connections
-            if timeout 3 bash -c "</dev/tcp/127.0.0.1/${PROXY_PORT}" 2>/dev/null; then
-              echo "✅ Proxy is ready on port ${PROXY_PORT}"
-              break
-            fi
-            
-            if [ $i -eq 60 ]; then
-              echo "❌ Proxy failed to start within 60 seconds"
-              echo "=== Proxy Logs ==="
-              cat proxy.log || true
-              exit 1
-            fi
-            
+            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && { echo "Proxy is up"; break; }
             sleep 1
           done
 
-      # 4) Test connection with psql
-      - name: Test database connectivity
+          # Final check
+          (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 || { echo "Port 5432 not open"; sed -n '1,200p' proxy.log || true; exit 1; }
+
+      # Sanity: prove connectivity with psql before running Liquibase
+      - name: Install psql and test connectivity
         shell: bash
         run: |
           set -euo pipefail
-          
-          # Install PostgreSQL client
-          sudo apt-get update -qq
+          sudo apt-get update -y
           sudo apt-get install -y postgresql-client
-          
-          # Test connection
-          echo "Testing database connection..."
-          PGPASSWORD="${DB_PASSWORD}" psql \
-            -h 127.0.0.1 \
-            -p ${PROXY_PORT} \
-            -d "${DB_NAME}" \
-            -U "${DB_USER}" \
-            -c "SELECT version();" \
-            -c "\conninfo"
+          PGPASSWORD='${{ secrets.ALLOYDB_DB_PASSWORD }}' psql \
+            "host=127.0.0.1 port=5432 dbname=${{ secrets.ALLOYDB_DATABASE }} user=${{ secrets.ALLOYDB_DB_USER }} sslmode=disable" \
+            -c '\conninfo'
 
-      # 5) Setup Liquibase with PostgreSQL driver
-      - name: Setup Liquibase
+      # Install Liquibase
+      - name: Setup Liquibase CLI
+        uses: liquibase/setup-liquibase@v1
+        with:
+          version: "4.33.0"
+          edition: "oss"
+
+      # PostgreSQL JDBC driver for Liquibase
+      - name: Download PostgreSQL JDBC driver
         shell: bash
         run: |
           set -euo pipefail
-          
-          # Download Liquibase
-          LIQUIBASE_VERSION="4.29.2"  # Use stable version
-          curl -sSL -o liquibase.tar.gz \
-            "https://github.com/liquibase/liquibase/releases/download/v${LIQUIBASE_VERSION}/liquibase-${LIQUIBASE_VERSION}.tar.gz"
-          
-          tar -xzf liquibase.tar.gz
-          chmod +x liquibase
-          
-          # Download PostgreSQL JDBC driver
-          curl -sSL -o postgresql.jar \
-            "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
-          
-          # Verify Liquibase installation
-          ./liquibase --version
+          curl -sSL -o postgresql.jar "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
+          test -f postgresql.jar
 
-      # 6) Run Liquibase migration
-      - name: Run Liquibase Update
+      # Run Liquibase update via proxy on 5432
+      - name: Liquibase update
         shell: bash
+        env:
+          LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:5432/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
+          DB_USER: ${{ secrets.ALLOYDB_DB_USER }}
+          DB_PASSWORD: ${{ secrets.ALLOYDB_DB_PASSWORD }}
+          LIQUIBASE_LOG_LEVEL: info
         run: |
           set -euo pipefail
-          
-          # Ensure changelog file exists
-          if [ ! -f "changelogs/db.changelog-master.xml" ]; then
-            echo "❌ Changelog file not found: changelogs/db.changelog-master.xml"
-            echo "Available files:"
-            find . -name "*.xml" -o -name "*changelog*" | head -10
-            exit 1
-          fi
-          
-          echo "Running Liquibase update..."
-          ./liquibase \
+          liquibase \
             --url="${LIQUIBASE_URL}" \
             --username="${DB_USER}" \
             --password="${DB_PASSWORD}" \
             --changelog-file="changelogs/db.changelog-master.xml" \
-            --classpath="$(pwd)/postgresql.jar" \
-            --log-level=info \
+            --classpath="${{ github.workspace }}/postgresql.jar" \
+            --log-level="${LIQUIBASE_LOG_LEVEL}" \
             update
-          
-          echo "✅ Liquibase update completed successfully"
 
-      # 7) Cleanup and error handling
+      # If anything fails above, show proxy logs for quick diagnosis
       - name: Show proxy logs on failure
         if: failure()
-        shell: bash
         run: |
-          echo "=== AlloyDB Auth Proxy Logs ==="
-          if [ -f proxy.log ]; then
-            cat proxy.log
-          else
-            echo "No proxy.log file found"
-          fi
-          
-          # Show process status
-          echo "=== Process Status ==="
-          ps aux | grep -E "(alloydb|liquibase)" | grep -v grep || true
+          echo "===== AlloyDB Auth Proxy Logs ====="
+          sed -n '1,200p' proxy.log || true
 
-      - name: Cleanup
+      # Always stop the proxy
+      - name: Stop proxy
         if: always()
-        shell: bash
         run: |
-          # Kill proxy process
-          if [ -f proxy.pid ] && kill -0 "$(cat proxy.pid)" 2>/dev/null; then
-            echo "Stopping proxy process..."
-            kill "$(cat proxy.pid)" || true
-            sleep 2
-            # Force kill if still running
-            kill -9 "$(cat proxy.pid)" 2>/dev/null || true
-          fi
-          
-          # Cleanup files
-          rm -f proxy.pid proxy.log postgresql.jar liquibase.tar.gz sa.json || true
+          if [ -f proxy.pid ]; then kill "$(cat proxy.pid)" || true; fi
