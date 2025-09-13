@@ -72,19 +72,20 @@ jobs:
         run: |
           curl -L -o postgresql.jar https://jdbc.postgresql.org/download/postgresql-42.7.4.jar
 
-       - name: Liquibase update (multiline, safe)
-        shell: bash       
-
+      - name: Liquibase update (multiline, safe)  
+        shell: bash
+        env:
+          LIQUIBASE_LOG_LEVEL: info
         run: |
-        set -euo pipefail
-        liquibase \
-          --url="${LIQUIBASE_URL}" \
-          --username="${DB_USER}" \
-          --password="${DB_PASSWORD}" \
-          --changelog-file="changelogs/db.changelog-master.xml" \
-          --classpath="${HOME}/postgresql.jar" \
-          --log-level="${LIQUIBASE_LOG_LEVEL}" \
-          update
+          set -euo pipefail
+          liquibase \
+            --url="${LIQUIBASE_URL}" \
+            --username="${DB_USER}" \
+            --password="${DB_PASSWORD}" \
+            --changelog-file="changelogs/db.changelog-master.xml" \
+            --classpath="${{ github.workspace }}/postgresql.jar" \
+            --log-level="${LIQUIBASE_LOG_LEVEL}" \
+            update
           
       - name: Stop proxy
         if: always()
