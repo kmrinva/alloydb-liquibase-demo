@@ -1,4 +1,4 @@
-name: Liquibase → AlloyDB via Auth Proxy
+name: Liquibase → AlloyDB via Auth Proxy Claude
 
 on:
   workflow_dispatch:
