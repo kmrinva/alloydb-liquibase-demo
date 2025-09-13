@@ -47,7 +47,7 @@ jobs:
           ./alloydb-auth-proxy --version
 
       # 3) Start proxy in background (verbose) and WAIT for port
-      - name: Start AlloyDB Auth Proxy (verbose, port 6543)
+      - name: Start AlloyDB Auth Proxy (verbose, port 5432)
         shell: bash
         env:
           TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
@@ -61,7 +61,7 @@ jobs:
           ./alloydb-auth-proxy \
             --verbose \
             --address=127.0.0.1 \
-            --port=6543 \
+            --port=5432 \
             --credentials-file=sa.json \
             "$TARGET_URI" > proxy.log 2>&1 &
 
