@@ -25,49 +25,77 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          version: ">= 486.0.0"
-
-      - name: Authenticate to GCP (service account JSON)
+      # 1) Authenticate FIRST (critical)
+      - name: Authenticate to GCP (JSON key)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
+      # (Optional) Install gcloud if you want to run `gcloud ...` checks later
+      - name: Setup gcloud CLI (optional)
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: ">= 486.0.0"
+
+      # 2) Download proxy and show version
       - name: Download AlloyDB Auth Proxy
+        shell: bash
         run: |
+          set -euo pipefail
           curl -sSL -o alloydb-auth-proxy "https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64"
           chmod +x alloydb-auth-proxy
           ./alloydb-auth-proxy --version
 
+      # 3) Start proxy in background (verbose) and WAIT for port
       - name: Start AlloyDB Auth Proxy (verbose, port 6543)
+        shell: bash
         env:
           TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
         run: |
+          set -euo pipefail
+          echo "Using instance URI: $TARGET_URI"
           echo '${{ secrets.GCP_SA_KEY }}' > sa.json
-          # Run proxy with verbose logging and bind explicitly to loopback on port 6543
+          chmod 600 sa.json
+
+          # Start proxy with logs captured
           ./alloydb-auth-proxy \
             --verbose \
             --address=127.0.0.1 \
             --port=6543 \
             --credentials-file=sa.json \
             "$TARGET_URI" > proxy.log 2>&1 &
+
           echo $! > proxy.pid
-          # Wait for the port to open
-          for i in {1..30}; do (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy up" && break; sleep 1; done
-          # Show the last few lines now; we will also cat this file if anything fails later
+
+          # Wait for the port to open, but also bail if process dies
+          for i in {1..30}; do
+            if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
+              echo "Proxy process exited unexpectedly:"
+              sed -n '1,200p' proxy.log || true
+              exit 1
+            fi
+            (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy is up" && break
+            sleep 1
+          done
+
+          # Final check: ensure it’s listening
+          (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 || { echo "Port 6543 not open"; sed -n '1,200p' proxy.log || true; exit 1; }
+
+          # Show last lines now (useful for IAM/URI mistakes)
           tail -n 50 proxy.log || true
 
-      - name: Install psql client and test connectivity
+      # 4) Quick connectivity proof with psql (before Liquibase)
+      - name: Install psql and test connectivity
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y postgresql-client
-          # Try a lightweight connection first (no query)
           PGPASSWORD='${{ secrets.ALLOYDB_DB_PASSWORD }}' psql \
             "host=127.0.0.1 port=6543 dbname=${{ secrets.ALLOYDB_DATABASE }} user=${{ secrets.ALLOYDB_DB_USER }} sslmode=disable" \
             -c '\conninfo'
 
+      # 5) Liquibase + JDBC driver
       - name: Setup Liquibase CLI (v4.33.0 OSS)
         uses: liquibase/setup-liquibase@v1
         with:
@@ -77,7 +105,7 @@ jobs:
       - name: Download PostgreSQL JDBC driver
         run: curl -sSL -o postgresql.jar "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
 
-      - name: Liquibase update (use proxy on 6543)
+      - name: Liquibase update (via proxy on 6543)
         shell: bash
         env:
           LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:6543/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
@@ -95,20 +123,14 @@ jobs:
             --log-level="${LIQUIBASE_LOG_LEVEL}" \
             update
 
-      - name: If failure, show proxy logs
+      # 6) If anything failed, dump proxy logs
+      - name: Show proxy logs on failure
         if: failure()
         run: |
           echo "===== AlloyDB Auth Proxy Logs ====="
-          tail -n +1 proxy.log || true
+          sed -n '1,200p' proxy.log || true
 
       - name: Stop proxy
         if: always()
         run: |
           if [ -f proxy.pid ]; then kill "$(cat proxy.pid)" || true; fi
-
-
-          
-      - name: Stop proxy
-        if: always()
-        run: |
-          if [ -f proxy.pid ]; then kill $(cat proxy.pid) || true; fi
