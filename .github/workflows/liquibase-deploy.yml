@@ -76,11 +76,11 @@ jobs:
         env:
           LIQUIBASE_LOG_LEVEL: info
         run: |
-          liquibase             -
-          -url="${LIQUIBASE_URL}"             
+          liquibase             
+          --url="${LIQUIBASE_URL}"             
           --username="${DB_USER}"             
           --password="${DB_PASSWORD}"             
-          --changelog-file=changelog/changelog.xml             
+          --changelog-file=changelogs/db.changelog-master.xml             
           --classpath=postgresql.jar             
           update
 
