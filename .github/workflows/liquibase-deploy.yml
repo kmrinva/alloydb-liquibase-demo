@@ -47,42 +47,39 @@ jobs:
           ./alloydb-auth-proxy --version
 
       # 3) Start proxy in background (verbose) and WAIT for port
-      - name: Start AlloyDB Auth Proxy (verbose, port 5432)
-        shell: bash
-        env:
-          TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
-        run: |
-          set -euo pipefail
-          echo "Using instance URI: $TARGET_URI"
-          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
-          chmod 600 sa.json
+       - name: Start AlloyDB Auth Proxy (debug logs, port 6543)
+         shell: bash
+         env:
+           TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
+         run: |
+           set -euo pipefail
+           echo "Using instance URI: $TARGET_URI"
+           echo '${{ secrets.GCP_SA_KEY }}' > sa.json
+           chmod 600 sa.json
 
-          # Start proxy with logs captured
-          ./alloydb-auth-proxy \
-            --verbose \
-            --address=127.0.0.1 \
-            --port=5432 \
-            --credentials-file=sa.json \
-            "$TARGET_URI" > proxy.log 2>&1 &
+           # Start proxy (no --verbose; use --log-level=debug)
+           ./alloydb-auth-proxy \
+             --log-level=debug \
+             --address=127.0.0.1 \
+             --port=6543 \
+             --credentials-file=sa.json \
+             "$TARGET_URI" > proxy.log 2>&1 &
 
-          echo $! > proxy.pid
+           echo $! > proxy.pid
 
-          # Wait for the port to open, but also bail if process dies
-          for i in {1..30}; do
-            if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
-              echo "Proxy process exited unexpectedly:"
-              sed -n '1,200p' proxy.log || true
-              exit 1
-            fi
-            (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy is up" && break
-            sleep 1
-          done
+           # Wait for port to open; fail early if process dies
+           for i in {1..30}; do
+             if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
+               echo "Proxy process exited unexpectedly:"
+               sed -n '1,200p' proxy.log || true
+               exit 1
+             fi
+             (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy is up" && break
+             sleep 1
+           done
 
-          # Final check: ensure it’s listening
-          (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 || { echo "Port 6543 not open"; sed -n '1,200p' proxy.log || true; exit 1; }
-
-          # Show last lines now (useful for IAM/URI mistakes)
-          tail -n 50 proxy.log || true
+           (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 || { echo "Port 6543 not open"; sed -n '1,200p' proxy.log || true; exit 1; }
+           tail -n 50 proxy.log || true
 
       # 4) Quick connectivity proof with psql (before Liquibase)
       - name: Install psql and test connectivity
