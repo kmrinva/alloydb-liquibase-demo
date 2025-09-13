@@ -47,34 +47,34 @@ jobs:
           ./alloydb-auth-proxy --version
 
       # 3) Start proxy in background (verbose) and WAIT for port
-       - name: Start AlloyDB Auth Proxy (debug logs, port 6543)
-         shell: bash
-         env:
-           TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
-         run: |
-           set -euo pipefail
-           echo "Using instance URI: $TARGET_URI"
-           echo '${{ secrets.GCP_SA_KEY }}' > sa.json
-           chmod 600 sa.json
+      - name: Start AlloyDB Auth Proxy (debug logs, port 6543)
+        shell: bash
+        env:
+          TARGET_URI: projects/${{ secrets.GCP_PROJECT_ID }}/locations/${{ secrets.ALLOYDB_REGION }}/clusters/${{ secrets.ALLOYDB_CLUSTER }}/instances/${{ secrets.ALLOYDB_INSTANCE }}
+        run: |
+          set -euo pipefail
+          echo "Using instance URI: $TARGET_URI"
+          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
+          chmod 600 sa.json
 
-           # Start proxy (no --verbose; use --log-level=debug)
-           ./alloydb-auth-proxy \
-             --log-level=debug \
-             --address=127.0.0.1 \
-             --port=6543 \
-             --credentials-file=sa.json \
-             "$TARGET_URI" > proxy.log 2>&1 &
+          # Start proxy (no --verbose; use --log-level=debug)
+          ./alloydb-auth-proxy \
+            --log-level=debug \
+            --address=127.0.0.1 \
+            --port=6543 \
+            --credentials-file=sa.json \
+            "$TARGET_URI" > proxy.log 2>&1 &
 
-           echo $! > proxy.pid
+          echo $! > proxy.pid
 
-           # Wait for port to open; fail early if process dies
-           for i in {1..30}; do
-             if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
-               echo "Proxy process exited unexpectedly:"
-               sed -n '1,200p' proxy.log || true
-               exit 1
-             fi
-             (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy is up" && break
+          # Wait for port to open; fail early if process dies
+          for i in {1..30}; do
+            if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
+              echo "Proxy process exited unexpectedly:"
+              sed -n '1,200p' proxy.log || true
+              exit 1
+            fi
+            (echo > /dev/tcp/127.0.0.1/6543) >/dev/null 2>&1 && echo "Proxy is up" && break
              sleep 1
            done
 
@@ -102,10 +102,10 @@ jobs:
       - name: Download PostgreSQL JDBC driver
         run: curl -sSL -o postgresql.jar "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
 
-      - name: Liquibase update (via proxy on 6543)
+      - name: Liquibase update (via proxy on 5432)
         shell: bash
         env:
-          LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:6543/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
+          LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:5432/${{ secrets.ALLOYDB_DATABASE }}?sslmode=disable
           DB_USER: ${{ secrets.ALLOYDB_DB_USER }}
           DB_PASSWORD: ${{ secrets.ALLOYDB_DB_PASSWORD }}
           LIQUIBASE_LOG_LEVEL: info
