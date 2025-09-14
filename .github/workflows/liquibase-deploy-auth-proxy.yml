@@ -1,4 +1,4 @@
-name: Liquibase - AlloyDB via Auth Proxy
+name: Liquibase - AlloyDB (self-hosted VPC runner)
 
 on:
   workflow_dispatch:
@@ -7,72 +7,23 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, vpc]   # your runner labels
     env:
-      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      REGION:     ${{ secrets.ALLOYDB_REGION }}
-      CLUSTER:    ${{ secrets.ALLOYDB_CLUSTER }}
-      INSTANCE:   ${{ secrets.ALLOYDB_INSTANCE }}
-      DB_NAME:    ${{ secrets.ALLOYDB_DATABASE }}
-      DB_USER:    ${{ secrets.ALLOYDB_DB_USER }}
-      DB_PASS:    ${{ secrets.ALLOYDB_DB_PASSWORD }}
+      DB_HOST: "10.3.0.2"                     # AlloyDB private IP
+      DB_PORT: "5433"                         # <-- from your log
+      DB_NAME: ${{ secrets.ALLOYDB_DATABASE }}
+      DB_USER: ${{ secrets.ALLOYDB_DB_USER }}
+      DB_PASS: ${{ secrets.ALLOYDB_DB_PASSWORD }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Authenticate to GCP (JSON key)
-        uses: google-github-actions/auth@v2
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Download AlloyDB Auth Proxy
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -sSL -o alloydb-auth-proxy "https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64"
-          chmod +x alloydb-auth-proxy
-          ./alloydb-auth-proxy --version
-
-      - name: Start AlloyDB Auth Proxy (port 5432)
-        shell: bash
-        env:
-          TARGET_URI: projects/${{ env.PROJECT_ID }}/locations/${{ env.REGION }}/clusters/${{ env.CLUSTER }}/instances/${{ env.INSTANCE }}
-        run: |
-          set -euo pipefail
-          echo "==> Using instance URI (IDs, not display names): $TARGET_URI"
-          echo '${{ secrets.GCP_SA_KEY }}' > sa.json
-          chmod 600 sa.json
-
-          ./alloydb-auth-proxy \
-            --address=127.0.0.1 \
-            --port=5432 \
-            --credentials-file=sa.json \
-            "$TARGET_URI" > proxy.log 2>&1 &
-
-          echo $! > proxy.pid
-          # Wait up to 30s for port to open; fail early if process dies
-          for i in {1..30}; do
-            if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
-              echo "Proxy process exited unexpectedly:"
-              sed -n '1,200p' proxy.log || true
-              exit 1
-            fi
-            (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 && { echo "Proxy is up"; break; }
-            sleep 1
-          done
-          (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1 || { echo "Port 5432 not open"; sed -n '1,200p' proxy.log || true; exit 1; }
-
-      - name: Install psql and test connectivity
-        shell: bash
-        continue-on-error: true   # we still want logs below if this fails
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y postgresql-client
-          PGPASSWORD="$DB_PASS" psql \
-            "host=127.0.0.1 port=5432 dbname=$DB_NAME user=$DB_USER sslmode=disable" \
-            -c '\conninfo'
+          distribution: temurin
+          java-version: "21"
 
       - name: Setup Liquibase CLI
         uses: liquibase/setup-liquibase@v1
@@ -81,19 +32,15 @@ jobs:
           edition: "oss"
 
       - name: Download PostgreSQL JDBC driver
-        shell: bash
         run: |
-          set -euo pipefail
           curl -sSL -o postgresql.jar "https://jdbc.postgresql.org/download/postgresql-42.7.4.jar"
           test -f postgresql.jar
 
-      - name: Liquibase update
-        shell: bash
+      - name: Liquibase update (direct to private IP)
         env:
-          LIQUIBASE_URL: jdbc:postgresql://127.0.0.1:5432/${{ env.DB_NAME }}?sslmode=disable
+          LIQUIBASE_URL: jdbc:postgresql://${{ env.DB_HOST }}:${{ env.DB_PORT }}/${{ env.DB_NAME }}?sslmode=require
           LIQUIBASE_LOG_LEVEL: info
         run: |
-          set -euo pipefail
           liquibase \
             --url="${LIQUIBASE_URL}" \
             --username="${DB_USER}" \
@@ -103,13 +50,3 @@ jobs:
             --log-level="${LIQUIBASE_LOG_LEVEL}" \
             update
 
-      - name: Dump proxy logs (always)
-        if: always()
-        run: |
-          echo "===== AlloyDB Auth Proxy Logs ====="
-          sed -n '1,200p' proxy.log || true
-
-      - name: Stop proxy
-        if: always()
-        run: |
-          if [ -f proxy.pid ]; then kill "$(cat proxy.pid)" || true; fi
