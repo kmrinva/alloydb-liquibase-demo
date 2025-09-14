@@ -21,7 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Auth only to provide ADC for the proxy (no gcloud usage here)
       - name: Authenticate to GCP (JSON key)
         uses: google-github-actions/auth@v2
         with:
@@ -33,7 +32,7 @@ jobs:
           set -euo pipefail
           curl -sSL -o alloydb-auth-proxy "https://storage.googleapis.com/alloydb-auth-proxy/v1.11.0/alloydb-auth-proxy.linux.amd64"
           chmod +x alloydb-auth-proxy
-          ./alloydb-auth-proxy --help >/dev/null 2>&1 || { echo "Proxy binary not runnable"; exit 1; }
+          ./alloydb-auth-proxy --version
 
       - name: Start AlloyDB Auth Proxy (port 5432)
         shell: bash
@@ -41,7 +40,7 @@ jobs:
           TARGET_URI: projects/${{ env.PROJECT_ID }}/locations/${{ env.REGION }}/clusters/${{ env.CLUSTER }}/instances/${{ env.INSTANCE }}
         run: |
           set -euo pipefail
-          echo "Using instance URI: $TARGET_URI"
+          echo "==> Using instance URI (IDs, not display names): $TARGET_URI"
           echo '${{ secrets.GCP_SA_KEY }}' > sa.json
           chmod 600 sa.json
 
@@ -52,8 +51,7 @@ jobs:
             "$TARGET_URI" > proxy.log 2>&1 &
 
           echo $! > proxy.pid
-
-          # Wait up to 30s for port to open; also bail if process dies
+          # Wait up to 30s for port to open; fail early if process dies
           for i in {1..30}; do
             if ! kill -0 "$(cat proxy.pid)" 2>/dev/null; then
               echo "Proxy process exited unexpectedly:"
@@ -67,6 +65,7 @@ jobs:
 
       - name: Install psql and test connectivity
         shell: bash
+        continue-on-error: true   # we still want logs below if this fails
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -104,8 +103,8 @@ jobs:
             --log-level="${LIQUIBASE_LOG_LEVEL}" \
             update
 
-      - name: Show proxy logs on failure
-        if: failure()
+      - name: Dump proxy logs (always)
+        if: always()
         run: |
           echo "===== AlloyDB Auth Proxy Logs ====="
           sed -n '1,200p' proxy.log || true
