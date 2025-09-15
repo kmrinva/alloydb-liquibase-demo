@@ -35,31 +35,30 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT }}
 
-      - name: Enable Cloud Run API (idempotent)
+      - name: Verify Cloud Run API is enabled (read-only)
         run: |
-          gcloud services enable run.googleapis.com \
-            --project "${{ env.GCP_PROJECT }}"
-          # sanity
-          gcloud config set project "${{ env.GCP_PROJECT }}"
-          gcloud config set run/region "${{ env.GCP_REGION }}"
-          echo "Active account:"
-          gcloud auth list
+          if ! gcloud services list --enabled \
+            --filter="name:run.googleapis.com" \
+            --format="value(name)" | grep -q run.googleapis.com; then
+            echo "Cloud Run API is not enabled. Please enable it once outside CI:"
+            echo "  gcloud services enable run.googleapis.com --project ${GCP_PROJECT}"
+            exit 1
+          fi
 
-      # 1) Update the Job's environment variables (requires roles/run.admin)
+      # If you update Job env vars in CI, keep this step and ensure SA has roles/run.admin
       - name: Update Cloud Run Job env vars
         run: |
           gcloud run jobs update "${JOB_NAME}" \
             --region "${{ env.GCP_REGION }}" \
             --update-env-vars "INSTANCE_URI=${{ env.INSTANCE_URI }},DB_NAME=${{ env.DB_NAME }},DB_USER=${{ env.DB_USER }},DB_PASSWORD=${{ secrets.DB_PASSWORD_POC }}"
 
-      # 2) Execute the Job
       - name: Execute Cloud Run Job
         run: |
           gcloud run jobs execute "${JOB_NAME}" \
             --region "${{ env.GCP_REGION }}" \
             --wait
 
-      # 3) Optional: remove DB_PASSWORD from saved config
+      # Optional: remove DB_PASSWORD after the run
       - name: Scrub DB_PASSWORD from Job config (optional)
         if: always()
         run: |
@@ -76,5 +75,5 @@ jobs:
             --limit=1)
           echo "Execution: $EXEC_ID"
           gcloud run jobs executions logs read "$EXEC_ID" \
-            --region="${{ env.GCP_REGION }}" \
+            --region "${{ env.GCP_REGION }}" \
             --limit=200
