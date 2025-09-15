@@ -1,1 +1,1 @@
-web: bash ./bin/entrypoint.sh
+web: bash /workspace/bin/entrypoint.sh
