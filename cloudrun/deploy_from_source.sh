@@ -5,48 +5,69 @@ set -euo pipefail
 PROJECT_ID="autodeploydb"
 REGION="us-central1"
 
-# Use the default VPC and the default regional subnet
+# Use the default VPC
 NETWORK="default"
-SUBNET="default"                       # default subnet exists in each region incl. us-central1
 
-# Names to create/use
+# Dedicated subnet just for the connector (must be /28)
+SUBNET="serverless-connector-subnet"
+SUBNET_RANGE="10.8.0.0/28"   # <- adjust if this collides with your existing ranges
+
+# Names
 CONNECTOR="cr-liquibase-connector"
-RUN_SA="cloud-run-liquibase"           # runtime SA for the job (no key)
+RUN_SA="cloud-run-liquibase"
+RUN_SA_EMAIL="${RUN_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-# AlloyDB target (your IDs)
-INSTANCE_URI="projects/autodeploydb/locations/us-central1/clusters/alloydb-cluster/instances/alloydb-primary"
+# AlloyDB target
+INSTANCE_URI="projects/${PROJECT_ID}/locations/${REGION}/clusters/alloydb-cluster/instances/alloydb-primary"
 
 echo "Setting project..."
 gcloud config set project "$PROJECT_ID"
 
-echo "Enabling required APIs (idempotent)..."
+echo "Enable required APIs (idempotent)..."
 gcloud services enable run.googleapis.com vpcaccess.googleapis.com alloydb.googleapis.com
 
-echo "Creating runtime service account (if missing)..."
+echo "Create runtime service account (if missing)..."
 gcloud iam service-accounts create "$RUN_SA" --display-name="Cloud Run Liquibase SA" || true
-RUN_SA_EMAIL="${RUN_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-echo "Granting minimal IAM to runtime SA..."
+echo "Grant minimal IAM to runtime SA..."
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${RUN_SA_EMAIL}" --role="roles/alloydb.client" >/dev/null
+  --member="serviceAccount:${RUN_SA_EMAIL}" \
+  --role="roles/alloydb.client" >/dev/null
 
-echo "Creating Serverless VPC Access connector (if needed)..."
-gcloud compute networks vpc-access connectors create "$CONNECTOR" \
-  --region "$REGION" \
-  --network "$NETWORK" \
-  --subnet "$SUBNET" || true
+# Ensure /28 subnet exists
+if ! gcloud compute networks subnets describe "$SUBNET" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Creating /28 subnet [$SUBNET] in VPC [$NETWORK]..."
+  gcloud compute networks subnets create "$SUBNET" \
+    --network "$NETWORK" \
+    --region "$REGION" \
+    --range "$SUBNET_RANGE"
+else
+  echo "Subnet [$SUBNET] already exists."
+fi
 
-echo "Waiting for connector to become READY (this can take a couple minutes)..."
-# Poll until READY
-until gcloud compute networks vpc-access connectors describe "$CONNECTOR" --region "$REGION" \
-       --format="value(state)" | grep -q "READY"; do
-  echo "  connector state: $(gcloud compute networks vpc-access connectors describe "$CONNECTOR" --region "$REGION" --format='value(state)')" 
+# Ensure connector exists
+if ! gcloud compute networks vpc-access connectors describe "$CONNECTOR" --region "$REGION" >/dev/null 2>&1; then
+  echo "Creating connector [$CONNECTOR]..."
+  gcloud compute networks vpc-access connectors create "$CONNECTOR" \
+    --region "$REGION" \
+    --subnet "$SUBNET"
+else
+  echo "Connector [$CONNECTOR] already exists."
+fi
+
+echo "Waiting for connector to be READY..."
+for i in {1..60}; do
+  state=$(gcloud compute networks vpc-access connectors describe "$CONNECTOR" \
+            --region "$REGION" --format='value(state)' 2>/dev/null || true)
+  echo "  state: ${state:-<not found>}"
+  if [[ "$state" == "READY" ]]; then break; fi
+  if [[ -z "$state" ]]; then
+    echo "Connector not found; create failed. Exiting."; exit 1
+  fi
   sleep 10
 done
-echo "Connector is READY."
 
-echo "Deploying Cloud Run Job from SOURCE (buildpacks, no Dockerfile)..."
-# We don't set env here; CI will set/update before execute.
+echo "Deploying Cloud Run Job from source..."
 gcloud run jobs deploy liquibase-apply \
   --source . \
   --region "$REGION" \
@@ -56,4 +77,3 @@ gcloud run jobs deploy liquibase-apply \
 
 echo "Done. Verify with:"
 echo "  gcloud run jobs describe liquibase-apply --region $REGION"
-
