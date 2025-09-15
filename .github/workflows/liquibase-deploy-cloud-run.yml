@@ -1,0 +1,56 @@
+name: Liquibase PoC via Cloud Run Job
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ "liquibase/**", "bin/**", "cloudrun/**" ]
+
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT: autodeploydb
+  GCP_REGION: us-central1
+  JOB_NAME: liquibase-apply
+
+  # AlloyDB identifiers (edit DB_NAME/DB_USER as needed for your DB)
+  INSTANCE_URI: projects/autodeploydb/locations/us-central1/clusters/alloydb-cluster/instances/alloydb-primary
+  DB_NAME: test_liquibase       # <-- change to your target database
+  DB_USER: postgres   # <-- change to your Liquibase DB role/user
+
+jobs:
+  run:
+    runs-on: ubuntu-latest   # GitHub-hosted runner (fixes "self-hosted" queue issue)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (JSON key)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+
+      - name: Execute Cloud Run Job with DB credentials
+        run: |
+          gcloud run jobs execute "${JOB_NAME}" \
+            --region "${{ env.GCP_REGION }}" \
+            --set-env-vars "INSTANCE_URI=${{ env.INSTANCE_URI }},DB_NAME=${{ env.DB_NAME }},DB_USER=${{ env.DB_USER }}" \
+            --set-env-vars "DB_PASSWORD=${{ secrets.ALLOYDB_PASSWORD }}" \
+            --wait
+
+      - name: Show Cloud Run Job logs
+        run: |
+          EXEC_ID=$(gcloud run jobs executions list \
+            --job="${JOB_NAME}" \
+            --region="${{ env.GCP_REGION }}" \
+            --format="value(name)" \
+            --limit=1)
+          echo "Execution: $EXEC_ID"
+          gcloud run jobs executions logs read "$EXEC_ID" \
+            --region="${{ env.GCP_REGION }}" \
+            --limit=200
