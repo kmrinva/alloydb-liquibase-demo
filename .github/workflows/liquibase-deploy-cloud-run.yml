@@ -14,14 +14,14 @@ env:
   GCP_REGION: us-central1
   JOB_NAME: liquibase-apply
 
-  # AlloyDB identifiers (edit DB_NAME/DB_USER as needed for your DB)
+  # Edit DB_NAME/DB_USER to your values if needed
   INSTANCE_URI: projects/autodeploydb/locations/us-central1/clusters/alloydb-cluster/instances/alloydb-primary
-  DB_NAME: test_liquibase       # <-- change to your target database
-  DB_USER: postgres   # <-- change to your Liquibase DB role/user
+  DB_NAME: test_liquibase
+  DB_USER: postgres
 
 jobs:
   run:
-    runs-on: ubuntu-latest   # GitHub-hosted runner (fixes "self-hosted" queue issue)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -35,13 +35,27 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT }}
 
-      - name: Execute Cloud Run Job with DB credentials
+      # 1) Update the Job's environment variables (includes DB password from GH Secrets)
+      - name: Update Cloud Run Job env vars
+        run: |
+          gcloud run jobs update "${JOB_NAME}" \
+            --region "${{ env.GCP_REGION }}" \
+            --update-env-vars "INSTANCE_URI=${{ env.INSTANCE_URI }},DB_NAME=${{ env.DB_NAME }},DB_USER=${{ env.DB_USER }},DB_PASSWORD=${{ secrets.DB_PASSWORD_POC }}"
+
+      # 2) Execute the Job
+      - name: Execute Cloud Run Job
         run: |
           gcloud run jobs execute "${JOB_NAME}" \
             --region "${{ env.GCP_REGION }}" \
-            --set-env-vars "INSTANCE_URI=${{ env.INSTANCE_URI }},DB_NAME=${{ env.DB_NAME }},DB_USER=${{ env.DB_USER }}" \
-            --set-env-vars "DB_PASSWORD=${{ secrets.ALLOYDB_PASSWORD }}" \
             --wait
+
+      # 3) (Optional but recommended for PoC) remove DB_PASSWORD from the Job config after run
+      - name: Scrub DB_PASSWORD from Job config (optional)
+        if: always()
+        run: |
+          gcloud run jobs update "${JOB_NAME}" \
+            --region "${{ env.GCP_REGION }}" \
+            --remove-env-vars "DB_PASSWORD"
 
       - name: Show Cloud Run Job logs
         run: |
@@ -54,3 +68,4 @@ jobs:
           gcloud run jobs executions logs read "$EXEC_ID" \
             --region="${{ env.GCP_REGION }}" \
             --limit=200
+
