@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ===== FIX THESE TWO NAMES TO MATCH YOUR VPC =====
-NETWORK="YOUR_VPC_NAME"
-SUBNET="YOUR_SUBNET_NAME"        # must be in us-central1
+NETWORK="default"
+SUBNET="default"        # must be in us-central1
 # ================================================
 
 PROJECT_ID="autodeploydb"
