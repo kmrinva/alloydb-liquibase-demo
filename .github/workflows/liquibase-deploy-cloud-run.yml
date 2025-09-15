@@ -50,7 +50,7 @@ jobs:
         run: |
           gcloud run jobs update "${JOB_NAME}" \
             --region "${{ env.GCP_REGION }}" \
-            --update-env-vars "INSTANCE_URI=${{ env.INSTANCE_URI }},DB_NAME=${{ env.DB_NAME }},DB_USER=${{ env.DB_USER }},DB_PASSWORD=${{ secrets.DB_PASSWORD_POC }}"
+            --update-env-vars "INSTANCE_URI=${{ env.INSTANCE_URI }},DB_NAME=${{ env.DB_NAME }},DB_USER=${{ env.DB_USER }},DB_PASSWORD=${{ secrets.ALLOYDB_PASSWORD }}"
 
       - name: Execute Cloud Run Job
         run: |
