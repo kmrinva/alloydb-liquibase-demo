@@ -1,4 +1,4 @@
-name: Liquibase PoC via Cloud Run Job
+name: Liquibase PoC via Cloud Run Job (self-healing)
 
 on:
   workflow_dispatch:
@@ -14,10 +14,16 @@ env:
   GCP_REGION: us-central1
   JOB_NAME: liquibase-apply
 
-  # Edit DB_NAME/DB_USER to your values if needed
+  # Adjust these to your DB/user
   INSTANCE_URI: projects/autodeploydb/locations/us-central1/clusters/alloydb-cluster/instances/alloydb-primary
   DB_NAME: test_liquibase
   DB_USER: postgres
+
+  # VPC connector (must already exist in us-central1)
+  VPC_CONNECTOR: projects/autodeploydb/locations/us-central1/connectors/cr-liquibase-connector
+
+  # Runtime service account for the Job (created by your one-time script)
+  RUN_SA_EMAIL: cloud-run-liquibase@autodeploydb.iam.gserviceaccount.com
 
 jobs:
   run:
@@ -35,18 +41,34 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT }}
 
-      - name: Verify Cloud Run API is enabled (read-only)
+      - name: Show active account and project
         run: |
-          if ! gcloud services list --enabled \
-            --filter="name:run.googleapis.com" \
-            --format="value(name)" | grep -q run.googleapis.com; then
-            echo "Cloud Run API is not enabled. Please enable it once outside CI:"
-            echo "  gcloud services enable run.googleapis.com --project ${GCP_PROJECT}"
-            exit 1
+          gcloud auth list
+          gcloud config set project "${{ env.GCP_PROJECT }}"
+          gcloud config set run/region "${{ env.GCP_REGION }}"
+
+      - name: Ensure Cloud Run Job exists (deploy from source if missing)
+        id: ensure
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gcloud run jobs describe "${JOB_NAME}" --region "${GCP_REGION}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Job ${JOB_NAME} already exists."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Job ${JOB_NAME} not found. Deploying from source..."
+            # This uses buildpacks (no Dockerfile)
+            gcloud run jobs deploy "${JOB_NAME}" \
+              --source . \
+              --region "${GCP_REGION}" \
+              --service-account "${RUN_SA_EMAIL}" \
+              --vpc-connector "${VPC_CONNECTOR}" \
+              --vpc-egress all-traffic
           fi
 
-      # If you update Job env vars in CI, keep this step and ensure SA has roles/run.admin
-      - name: Update Cloud Run Job env vars
+      # Update env vars with DB creds (requires roles/run.admin)
+      - name: Update Job env vars (INSTANCE_URI, DB_NAME/USER, DB_PASSWORD)
         run: |
           gcloud run jobs update "${JOB_NAME}" \
             --region "${{ env.GCP_REGION }}" \
@@ -58,7 +80,7 @@ jobs:
             --region "${{ env.GCP_REGION }}" \
             --wait
 
-      # Optional: remove DB_PASSWORD after the run
+      # Optional: remove DB_PASSWORD from saved config after the run
       - name: Scrub DB_PASSWORD from Job config (optional)
         if: always()
         run: |
@@ -66,11 +88,11 @@ jobs:
             --region "${{ env.GCP_REGION }}" \
             --remove-env-vars "DB_PASSWORD"
 
-      - name: Show Cloud Run Job logs
+      - name: Show latest Job execution logs
         run: |
           EXEC_ID=$(gcloud run jobs executions list \
             --job="${JOB_NAME}" \
-            --region="${{ env.GCP_REGION }}" \
+            --region "${{ env.GCP_REGION }}" \
             --format="value(name)" \
             --limit=1)
           echo "Execution: $EXEC_ID"
