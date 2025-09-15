@@ -5,7 +5,7 @@ set -euo pipefail
 # INSTANCE_URI, DB_NAME, DB_USER, DB_PASSWORD
 PROXY_PORT="${PROXY_PORT:-5432}"
 LB_PROPERTIES="${LB_PROPERTIES:-/workspace/liquibase/liquibase.properties}"
-LB_CHANGELOG_FILE="${LB_CHANGELOG_FILE:-/workspace/liquibase/changelog.xml}"
+LB_CHANGELOG_FILE="${LB_CHANGELOG_FILE:-/workspace/changelogs/db.changelog-master.xml}"
 
 echo "[proxy] Starting AlloyDB Auth Proxy on :${PROXY_PORT} ..."
 nohup alloydb-auth-proxy --port "${PROXY_PORT}" "${INSTANCE_URI}" >/tmp/proxy.log 2>&1 &
@@ -21,3 +21,4 @@ liquibase \
   update
 
 echo "[done] Liquibase update finished."
+
