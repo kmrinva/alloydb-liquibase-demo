@@ -1,1 +1,0 @@
-web: bash /workspace/bin/entrypoint.sh
