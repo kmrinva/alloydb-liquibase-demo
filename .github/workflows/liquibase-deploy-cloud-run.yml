@@ -35,7 +35,17 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT }}
 
-      # 1) Update the Job's environment variables (includes DB password from GH Secrets)
+      - name: Enable Cloud Run API (idempotent)
+        run: |
+          gcloud services enable run.googleapis.com \
+            --project "${{ env.GCP_PROJECT }}"
+          # sanity
+          gcloud config set project "${{ env.GCP_PROJECT }}"
+          gcloud config set run/region "${{ env.GCP_REGION }}"
+          echo "Active account:"
+          gcloud auth list
+
+      # 1) Update the Job's environment variables (requires roles/run.admin)
       - name: Update Cloud Run Job env vars
         run: |
           gcloud run jobs update "${JOB_NAME}" \
@@ -49,7 +59,7 @@ jobs:
             --region "${{ env.GCP_REGION }}" \
             --wait
 
-      # 3) (Optional but recommended for PoC) remove DB_PASSWORD from the Job config after run
+      # 3) Optional: remove DB_PASSWORD from saved config
       - name: Scrub DB_PASSWORD from Job config (optional)
         if: always()
         run: |
@@ -68,4 +78,3 @@ jobs:
           gcloud run jobs executions logs read "$EXEC_ID" \
             --region="${{ env.GCP_REGION }}" \
             --limit=200
-
