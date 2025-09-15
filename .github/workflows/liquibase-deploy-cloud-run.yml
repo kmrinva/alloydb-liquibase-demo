@@ -1,9 +1,10 @@
-name: Liquibase PoC via Cloud Run Job (self-healing)
+name: Liquibase PoC via Cloud Run Job
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    paths: [ "liquibase/**", "bin/**", "cloudrun/**" ]
 
 permissions:
   contents: read
@@ -13,16 +14,10 @@ env:
   GCP_REGION: us-central1
   JOB_NAME: liquibase-apply
 
-  # Adjust these to your DB/user
+  # Edit DB_NAME/DB_USER if needed
   INSTANCE_URI: projects/autodeploydb/locations/us-central1/clusters/alloydb-cluster/instances/alloydb-primary
   DB_NAME: test_liquibase
   DB_USER: postgres
-
-  # VPC connector (must already exist in us-central1)
-  VPC_CONNECTOR: projects/autodeploydb/locations/us-central1/connectors/cr-liquibase-connector
-
-  # Runtime service account for the Job (created by your one-time script)
-  RUN_SA_EMAIL: cloud-run-liquibase@autodeploydb.iam.gserviceaccount.com
 
 jobs:
   run:
@@ -46,28 +41,8 @@ jobs:
           gcloud config set project "${{ env.GCP_PROJECT }}"
           gcloud config set run/region "${{ env.GCP_REGION }}"
 
-      - name: Ensure Cloud Run Job exists (deploy from source if missing)
-        id: ensure
-        shell: bash
-        run: |
-          set -euo pipefail
-          if gcloud run jobs describe "${JOB_NAME}" --region "${GCP_REGION}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Job ${JOB_NAME} already exists."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Job ${JOB_NAME} not found. Deploying from source..."
-            # This uses buildpacks (no Dockerfile)
-            gcloud run jobs deploy "${JOB_NAME}" \
-              --source . \
-              --region "${GCP_REGION}" \
-              --service-account "${RUN_SA_EMAIL}" \
-              --vpc-connector "${VPC_CONNECTOR}" \
-              --vpc-egress all-traffic
-          fi
-
-      # Update env vars with DB creds (requires roles/run.admin)
-      - name: Update Job env vars (INSTANCE_URI, DB_NAME/USER, DB_PASSWORD)
+      # Update env vars on the Job (needs roles/run.admin on the SA in GCP_SA_KEY)
+      - name: Update Cloud Run Job env vars
         run: |
           gcloud run jobs update "${JOB_NAME}" \
             --region "${{ env.GCP_REGION }}" \
@@ -79,7 +54,7 @@ jobs:
             --region "${{ env.GCP_REGION }}" \
             --wait
 
-      # Optional: remove DB_PASSWORD from saved config after the run
+      # Optional: scrub DB_PASSWORD from saved Job config after run
       - name: Scrub DB_PASSWORD from Job config (optional)
         if: always()
         run: |
